@@ -28,7 +28,7 @@ dev = [
     "pytest>=8.3",
     "basedpyright>=1.21",
     "ruff>=0.9",
-    "jupyterlab>=4.0",
+    "notebook>=7.0",
     "ipykernel>=6.29",
 ]
 all = ["mule-pattern-learner[model,baseline,dev]"]

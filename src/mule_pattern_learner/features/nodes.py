@@ -181,3 +181,51 @@ def build_account_features(vertices: Sequence[object]) -> NodeFeatures:
         feats=feats,
         feature_names=ACCOUNT_NUMERIC_FEATURES,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class FeatureNormalizer:
+    """Per-feature z-score applied AFTER the log/symlog transforms above.
+
+    The log family tames heavy tails but leaves features on different centers and
+    spreads (a log-amount near 14 sitting beside a ratio in [0, 1] and a pagerank
+    near 1e-3). Standardizing to zero mean / unit variance puts them on one scale
+    so no single feature dominates the first linear layer and drives activations
+    (and logits) to extremes.
+
+    mean and std are length-NUM_ACCOUNT_FEATURES, in ACCOUNT_NUMERIC_FEATURES
+    column order, and MUST be fit on the training split only (see fit_normalizer)
+    then reused unchanged for val / test / inference -- otherwise val and test
+    feature statistics leak into training. They are saved with the checkpoint, so
+    scoring reuses the exact training-time standardization.
+    """
+
+    mean: Tensor
+    std: Tensor
+
+    def __post_init__(self) -> None:
+        if self.mean.shape != (NUM_ACCOUNT_FEATURES,) or self.std.shape != (NUM_ACCOUNT_FEATURES,):
+            raise NodeFeatureError(
+                f"normalizer mean/std must be ({NUM_ACCOUNT_FEATURES},); "
+                + f"got {tuple(self.mean.shape)} / {tuple(self.std.shape)}"
+            )
+
+    def apply(self, feats: Tensor) -> Tensor:
+        # std is floored away from zero in fit_normalizer, so this never divides
+        # by zero (a constant feature becomes all-zeros, which is harmless).
+        return (feats - self.mean.to(feats.device)) / self.std.to(feats.device)
+
+
+def normalizer_from_features(feats: Tensor) -> FeatureNormalizer:
+    """Fit a FeatureNormalizer from an (n, NUM_ACCOUNT_FEATURES) feature matrix.
+
+    Caller is responsible for passing TRAIN-split features only. A small floor on
+    std keeps constant / near-constant columns from producing huge or NaN values.
+    """
+    if feats.ndim != 2 or feats.shape[1] != NUM_ACCOUNT_FEATURES:
+        raise NodeFeatureError(
+            f"expected (n, {NUM_ACCOUNT_FEATURES}) features; got {tuple(feats.shape)}"
+        )
+    mean = feats.mean(dim=0)
+    std = feats.std(dim=0, unbiased=False).clamp_min(1e-6)
+    return FeatureNormalizer(mean=mean, std=std)

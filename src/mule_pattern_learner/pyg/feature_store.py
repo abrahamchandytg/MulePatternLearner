@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from typing import override
 
 import torch
@@ -11,6 +9,7 @@ from mule_pattern_learner.indexing.node_id_mapper import NodeIDMapper
 from mule_pattern_learner.pyg.fetch import fetch_account_vertices
 from mule_pattern_learner.features.nodes import (
     NUM_ACCOUNT_FEATURES,
+    FeatureNormalizer,
     build_account_features,
 )
 from mule_pattern_learner.tigergraph.client import Client
@@ -44,11 +43,18 @@ class TigerGraphFeatureStore(FeatureStore):
 
     _client: Client
     _mapper: NodeIDMapper
+    _normalizer: FeatureNormalizer | None
 
-    def __init__(self, client: Client, mapper: NodeIDMapper) -> None:
+    def __init__(
+        self,
+        client: Client,
+        mapper: NodeIDMapper,
+        normalizer: FeatureNormalizer | None = None,
+    ) -> None:
         super().__init__()
         self._client = client
         self._mapper = mapper
+        self._normalizer = normalizer
 
     def _index_to_ids(self, group_name: NodeType, index: Tensor) -> list[str]:
         int_ids: list[int] = [int(i) for i in index.tolist()]
@@ -81,7 +87,11 @@ class TigerGraphFeatureStore(FeatureStore):
 
         # Align the fetched rows to the requested index order: TigerGraph may
         # return vertices in any order, so reorder by the requested ids.
-        return self._align(features.node_ids, features.feats, string_ids)
+        aligned = self._align(features.node_ids, features.feats, string_ids)
+        # Standardize with the training-fit stats (identical at train and eval).
+        if self._normalizer is not None:
+            aligned = self._normalizer.apply(aligned)
+        return aligned
 
     def _align(self, fetched_ids: tuple[str, ...], feats: Tensor, requested: list[str]) -> Tensor:
         position: dict[str, int] = {sid: i for i, sid in enumerate(fetched_ids)}

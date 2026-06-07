@@ -13,6 +13,7 @@ parquet answer key, and prints hidden-recall@k plus AP/AUC against true labels.
 """
 
 from collections.abc import Iterable
+import math
 from pathlib import Path
 from typing import Protocol, cast
 
@@ -23,7 +24,9 @@ from numpy.typing import NDArray
 from torch import Tensor
 from torch_geometric.data import HeteroData
 from torch_geometric.typing import EdgeType, NodeType
+from tqdm import tqdm
 
+from mule_pattern_learner.features.nodes import FeatureNormalizer
 from mule_pattern_learner.pyg.backend import TigerGraphRemoteBackend
 from mule_pattern_learner.pyg.model import MulePatternModel
 from mule_pattern_learner.pyg.neighbors import NeighborFanout
@@ -109,6 +112,12 @@ def main() -> None:
     reference_epoch_s = cast(float, checkpoint["reference_epoch_s"])
     account_in_dim = cast(int, checkpoint["account_in_dim"])
     state_dict = cast("dict[str, torch.Tensor]", checkpoint["model_state_dict"])
+    # Rebuild the training-fit feature standardization so eval scores features
+    # exactly as training saw them.
+    normalizer = FeatureNormalizer(
+        mean=cast(torch.Tensor, checkpoint["feature_mean"]),
+        std=cast(torch.Tensor, checkpoint["feature_std"]),
+    )
     print(
         f"checkpoint: {ckpt_path.name} (best_val_pauc={cast(float, checkpoint['best_val_pauc']):.4f})"
     )
@@ -144,12 +153,21 @@ def main() -> None:
         shuffle=False,
         allow_val=True,
         allow_test=True,
+        normalizer=normalizer,
     )
 
     scores: list[float] = []
     seen_ids: list[str] = []
+    eval_batches = max(1, math.ceil(len(seed_ids) / _BATCH_SIZE))
+    bar = tqdm(
+        cast(Iterable[HeteroData], loader),
+        total=eval_batches,
+        unit="batch",
+        miniters=1,
+        desc="  eval",
+    )
     with torch.no_grad():
-        for batch in cast(Iterable[HeteroData], loader):
+        for batch in bar:
             account = _node_store(batch, "Account")
             bsize = int(account.batch_size)
             n_id = cast("list[int]", account.n_id[:bsize].tolist())

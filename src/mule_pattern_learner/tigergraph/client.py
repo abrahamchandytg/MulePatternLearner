@@ -7,9 +7,7 @@ from mule_pattern_learner.tigergraph.settings import Settings
 
 class Client:
     """
-    The underlying `pyTigerGraph.TigerGraphConnection` is exposed
-    via the `conn` attribute for downstream modules that need to invoke
-    pyTigerGraph methods directly.
+    Client that connects to TigerGraph
     """
 
     _settings: Settings
@@ -26,7 +24,6 @@ class Client:
 
     @property
     def graphname(self) -> str:
-        """Name of the graph this client is connected to."""
         return self._settings.graphname
 
     @override

@@ -235,6 +235,7 @@ def validate(
     _ = model.eval()
     scores: list[float] = []
     labels: list[int] = []
+    raw_logits: list[float] = []
     bar = tqdm(loader, total=total_batches, unit="batch", miniters=1, desc=f"  val e{epoch}")
     with torch.no_grad():
         for batch in bar:
@@ -243,10 +244,26 @@ def validate(
             seed_logits = logits[: len(seeds)]
             probs = cast(list[float], torch.sigmoid(seed_logits).tolist())
             scores.extend(probs)
+            raw_logits.extend(cast(list[float], seed_logits.tolist()))
             labels.extend(pu_label_of[s] for s in seeds)
 
     scores_arr: NDArray[np.float64] = np.asarray(scores, dtype=np.float64)
     labels_arr: NDArray[np.int64] = np.asarray(labels, dtype=np.int64)
+
+    logits_arr: NDArray[np.float64] = np.asarray(raw_logits, dtype=np.float64)
+    pos_mask = labels_arr == 1
+    pos_logits = logits_arr[pos_mask]
+    unl_logits = logits_arr[~pos_mask]
+    pos_mean = float(pos_logits.mean()) if pos_logits.size else float("nan")
+    unl_mean = float(unl_logits.mean()) if unl_logits.size else float("nan")
+    print(
+        f"    logits: all[mean={logits_arr.mean():.3f} std={logits_arr.std():.3f} "
+        + f"min={logits_arr.min():.3f} max={logits_arr.max():.3f}] "
+        + f"pos_mean={pos_mean:.3f} unl_mean={unl_mean:.3f} "
+        + f"separation={pos_mean - unl_mean:+.3f}",
+        flush=True,
+    )
+
     return evaluate_ranking(scores_arr, labels_arr, k=eval_k)
 
 

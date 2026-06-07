@@ -42,12 +42,8 @@ class GsqlPathError(KeyError):
 
 
 def gsql_root() -> Path:
-    """Absolute path to the repository's top-level gsql/ directory.
-
-    Resolved relative to this file's known location in the installed package
-    (src/mule_pattern_learner/tigergraph/gsql_paths.py), walking up to the repo
-    root, so it does not depend on the current working directory or on where a
-    calling script happens to live.
+    """
+    Absolute path to the repository's top-level gsql/ directory.
     """
     # this file: <repo>/src/mule_pattern_learner/tigergraph/gsql_paths.py
     # parents:    0 tigergraph  1 mule_pattern_learner  2 src  3 <repo>
@@ -56,10 +52,8 @@ def gsql_root() -> Path:
 
 
 def gsql_path(query_name: str) -> Path:
-    """Absolute path to the .gsql file defining the given installed query.
-
-    query_name is the name the query installs as (the same string passed to
-    runInstalledQuery), not a file path. Raises GsqlPathError for unknown names.
+    """
+    Absolute path to the .gsql file defining the query.
     """
     relpath = _GSQL_RELPATHS.get(query_name)
     if relpath is None:

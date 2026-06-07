@@ -2,6 +2,7 @@ import torch
 from torch import Tensor
 from torch_geometric.loader import NodeLoader
 
+from mule_pattern_learner.features.nodes import FeatureNormalizer
 from mule_pattern_learner.indexing.node_id_mapper import NodeIDMapper
 from mule_pattern_learner.pyg.transform import HasPaidEdgeFeatureAttacher
 from mule_pattern_learner.pyg.neighbors import NeighborFanout
@@ -76,7 +77,9 @@ class TigerGraphRemoteBackend:
             allow_test=allow_test,
         )
 
-    def make_feature_store(self) -> TigerGraphFeatureStore:
+    def make_feature_store(
+        self, normalizer: FeatureNormalizer | None = None
+    ) -> TigerGraphFeatureStore:
         """Build a feature store bound to this backend's client and mapper.
 
         The store shares this backend's mapper, so it reverses the same integer
@@ -84,8 +87,13 @@ class TigerGraphRemoteBackend:
         features. This shared mapper is why the sampler and store must come from
         one backend (PyG's _get_tensor sees only the integers, not the sampler's
         metadata).
+
+        normalizer, if given, standardizes account features as they are served
+        (fit on the train split; see FeatureNormalizer).
         """
-        return TigerGraphFeatureStore(client=self._client, mapper=self._mapper)
+        return TigerGraphFeatureStore(
+            client=self._client, mapper=self._mapper, normalizer=normalizer
+        )
 
     def make_graph_store(self) -> TigerGraphGraphStore:
         """Build a graph store bound to this backend's client and mapper.
@@ -117,6 +125,7 @@ class TigerGraphRemoteBackend:
         shuffle: bool = False,
         allow_val: bool = True,
         allow_test: bool = True,
+        normalizer: FeatureNormalizer | None = None,
     ) -> NodeLoader:
         """Build a PyG NodeLoader that yields HeteroData batches from TigerGraph.
 
@@ -134,7 +143,7 @@ class TigerGraphRemoteBackend:
         allow_test=False; for validation pass allow_val=True, allow_test=False;
         for test pass both True.
         """
-        feature_store = self.make_feature_store()
+        feature_store = self.make_feature_store(normalizer=normalizer)
         graph_store = self.make_graph_store()
         sampler = self.make_sampler(
             seed_ids=seed_ids,

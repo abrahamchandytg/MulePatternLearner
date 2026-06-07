@@ -3,7 +3,8 @@
 Production training path, end to end: seeds and PU targets are read from the
 GRAPH (the is_train / is_val / is_test flags and pu_label the masking step wrote
 onto Accounts) via get_split_accounts, the model trains with early stopping on
-validation average precision, and the best checkpoint is saved to models/.
+validation Proxy AUC (computed each epoch on a fixed seeded val subsample for
+speed), and the best checkpoint is saved to models/.
 
 One required argument, --estimated-mules: the class prior pi (true mule
 fraction) drives nnPU's positive_risk term, and pi cannot be derived -- in
@@ -33,6 +34,7 @@ import argparse
 from dataclasses import dataclass
 import math
 from pathlib import Path
+import random
 from typing import cast
 
 import torch
@@ -40,7 +42,12 @@ from torch import Tensor
 from torch_geometric.data import HeteroData
 
 from mule_pattern_learner.device import select_device
+from mule_pattern_learner.features.nodes import (
+    build_account_features,
+    normalizer_from_features,
+)
 from mule_pattern_learner.pyg.backend import TigerGraphRemoteBackend
+from mule_pattern_learner.pyg.fetch import fetch_account_vertices
 from mule_pattern_learner.pyg.model import MulePatternModel
 from mule_pattern_learner.pyg.neighbors import NeighborFanout
 from mule_pattern_learner.tigergraph.client import Client
@@ -70,12 +77,22 @@ _ACCOUNT_FEATURES = 31
 # production it is an assumption that cannot be derived (we never know the true
 # number of mules), so it is supplied per run as --estimated-mules and turned
 # into pi against the graph's account count. See _parse_args / _resolve_prior.
-_BATCH_SIZE = 1024
-_POSITIVES_PER_BATCH = 64
+_BATCH_SIZE = 512
+# Kept at 1/16 of the batch (6.25% positives) so halving _BATCH_SIZE changes
+# only peak memory, not the per-batch positive fraction.
+_POSITIVES_PER_BATCH = 32
 _MAX_EPOCHS = 30
 _PATIENCE = 5
 _EVAL_K = 100
 _RNG_SEED = 1337
+# Validation cost is dominated by the unlabeled accounts, not the few positives,
+# so per-epoch validation scores a fixed seeded subsample: ALL revealed positives
+# (the rare-class signal, kept whole to avoid inflating metric variance) plus this
+# many unlabeled. Full-population scoring is left to the separate hidden-mule eval.
+_VAL_UNLABELED_CAP = 10_000
+# Train accounts are fetched in chunks to fit the normalizer without pulling all
+# ~130k feature rows in a single request.
+_FEATURE_FETCH_CHUNK = 5_000
 _VERTEX_ACCOUNT = "Account"
 
 
@@ -170,11 +187,10 @@ def main() -> None:
         positives=tuple(a for a, y in train_seeds.pu_label_of.items() if y == 1),
         unlabeled=tuple(a for a, y in train_seeds.pu_label_of.items() if y == 0),
     )
-    val_seed_ids = val_seeds.account_ids
     print(
         f"graph seeds: train pos={train_pool.num_positives} "
         + f"unl={train_pool.num_unlabeled} val pos={val_seeds.num_positives} "
-        + f"val={len(val_seed_ids)}"
+        + f"val={len(val_seeds.account_ids)}"
     )
 
     # Fail fast, BEFORE the first (multi-hour) epoch: nnPU needs revealed
@@ -194,6 +210,41 @@ def main() -> None:
             "selection is undefined without a positive to rank. Re-mask (higher "
             "reveal prevalence) or adjust the split so val receives some positives."
         )
+
+    # Shrink the per-epoch validation set: keep every revealed positive, take a
+    # fixed seeded sample of the unlabeled up to _VAL_UNLABELED_CAP. Drawn ONCE
+    # here (not per epoch) so the val set is identical across epochs and the only
+    # thing moving PAUC is the model, not the sample. Keeping all positives means
+    # this does not worsen the rare-class variance that dominates the metric; it
+    # only removes redundant unlabeled scoring, which is pure cost. The full
+    # population is still scored by the separate hidden-mule evaluation.
+    val_positives = [a for a in val_seeds.account_ids if pu_label_of.get(a) == 1]
+    val_unlabeled = [a for a in val_seeds.account_ids if pu_label_of.get(a) != 1]
+    if len(val_unlabeled) > _VAL_UNLABELED_CAP:
+        val_unlabeled = random.Random(_RNG_SEED).sample(val_unlabeled, _VAL_UNLABELED_CAP)
+    val_seed_ids = tuple(val_positives) + tuple(val_unlabeled)
+    print(
+        f"val subsample: {len(val_positives)} positives + {len(val_unlabeled)} unlabeled "
+        + f"= {len(val_seed_ids)} (full val was {len(val_seeds.account_ids)})"
+    )
+
+    # Fit feature standardization on the TRAIN split only (leakage-safe), using
+    # the same log/symlog transforms the loaders apply, then reuse it unchanged
+    # for val/test. Computed here in Python (not GSQL) so it sees the post-
+    # transform values and never mixes in val/test statistics. Saved with the
+    # checkpoint so scoring reproduces the exact training-time standardization.
+    train_ids = tuple(train_seeds.account_ids)
+    feature_rows: list[Tensor] = []
+    for start in range(0, len(train_ids), _FEATURE_FETCH_CHUNK):
+        chunk = list(train_ids[start : start + _FEATURE_FETCH_CHUNK])
+        vertices = fetch_account_vertices(client, chunk)
+        feature_rows.append(build_account_features(vertices).feats)
+    train_features = torch.cat(feature_rows, dim=0)
+    normalizer = normalizer_from_features(train_features)
+    print(
+        f"feature normalizer fit on {train_features.shape[0]} train accounts "
+        + f"({train_features.shape[1]} features standardized)"
+    )
 
     fanout = NeighborFanout()
 
@@ -217,6 +268,7 @@ def main() -> None:
                 shuffle=False,
                 allow_val=False,
                 allow_test=False,
+                normalizer=normalizer,
             )
             yield from cast(Iterable[HeteroData], loader)
 
@@ -231,6 +283,7 @@ def main() -> None:
             shuffle=False,
             allow_val=True,
             allow_test=False,
+            normalizer=normalizer,
         )
         yield from cast(Iterable[HeteroData], loader)
 
@@ -246,7 +299,7 @@ def main() -> None:
     val_batches = max(1, math.ceil(len(val_seed_ids) / _BATCH_SIZE))
 
     print("=" * 70)
-    print("TRAINING (nnPU, strict-inductive, early-stop on val average precision)")
+    print("TRAINING (nnPU, strict-inductive, early-stop on val Proxy AUC)")
     print("=" * 70)
     _MODELS_DIR.mkdir(parents=True, exist_ok=True)
     checkpoint_path = _MODELS_DIR / f"mule_model_seed{_RNG_SEED}.pt"
@@ -264,6 +317,8 @@ def main() -> None:
             "prior": prior,
             "reference_epoch_s": reference_epoch_s,
             "max_bins": max_bins,
+            "feature_mean": normalizer.mean,
+            "feature_std": normalizer.std,
         }
         torch.save(checkpoint, checkpoint_path)
         print(

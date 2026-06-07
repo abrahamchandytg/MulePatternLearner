@@ -14,11 +14,11 @@ class Settings(BaseSettings):
 
     host: str = Field(
         default="",
-        description="TigerGraph host URL, including https://",
+        description="TigerGraph host URL",
     )
     graphname: str = Field(
         default="",
-        description="Name of the graph to operate on",
+        description="Name of the graph",
     )
     secret: SecretStr = Field(
         default=SecretStr(""),
